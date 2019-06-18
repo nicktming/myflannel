@@ -4,8 +4,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/joho/godotenv"
 	"github.com/nicktming/myflannel/backend"
 	"github.com/nicktming/myflannel/pkg/ip"
+	"github.com/nicktming/myflannel/subnet"
+	"github.com/nicktming/myflannel/subnet/etcdv2"
+	"github.com/nicktming/myflannel/subnet/kube"
 	"github.com/nicktming/myflannel/version"
 	"github.com/coreos/pkg/flagutil"
 	"net"
@@ -188,16 +192,66 @@ func main()  {
 	//	ExtAddr   net.IP
 	//}
 
-	log.Infof("IfaceAddr:%v, ExtAddr:%v, Iface.Name:%s, Iface.Index:%d, Iface.MTU:%d", extIface.IfaceAddr, extIface.ExtAddr,
+	log.Infof("======>IfaceAddr:%v, ExtAddr:%v, Iface.Name:%s, Iface.Index:%d, Iface.MTU:%d", extIface.IfaceAddr, extIface.ExtAddr,
 		extIface.Iface.Name, extIface.Iface.Index, extIface.Iface.MTU)
 
+	sm, err := newSubnetManager()
+	if err != nil {
+		log.Error("Failed to create SubnetManager: ", err)
+		os.Exit(1)
+	}
+	log.Infof("Created subnet manager: %s", sm.Name())
+
 }
+
+
+func newSubnetManager() (subnet.Manager, error) {
+	if opts.kubeSubnetMgr {
+		return kube.NewSubnetManager(opts.kubeApiUrl, opts.kubeConfigFile, opts.kubeAnnotationPrefix, opts.netConfPath)
+	}
+
+	cfg := &etcdv2.EtcdConfig{
+		Endpoints: strings.Split(opts.etcdEndpoints, ","),
+		Keyfile:   opts.etcdKeyfile,
+		Certfile:  opts.etcdCertfile,
+		CAFile:    opts.etcdCAFile,
+		Prefix:    opts.etcdPrefix,
+		Username:  opts.etcdUsername,
+		Password:  opts.etcdPassword,
+	}
+
+
+	log.Info("======>subnetFile:%s\n", opts.subnetFile)
+	// Attempt to renew the lease for the subnet specified in the subnetFile
+	prevSubnet := ReadCIDRFromSubnetFile(opts.subnetFile, "FLANNEL_SUBNET")
+	log.Info("======>subnetFile:%s\n", opts.subnetFile)
+
+	return etcdv2.NewLocalManager(cfg, prevSubnet)
+}
+
+func ReadCIDRFromSubnetFile(path string, CIDRKey string) ip.IP4Net {
+	var prevCIDR ip.IP4Net
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		prevSubnetVals, err := godotenv.Read(path)
+		if err != nil {
+			log.Errorf("Couldn't fetch previous %s from subnet file at %s: %s", CIDRKey, path, err)
+		} else if prevCIDRString, ok := prevSubnetVals[CIDRKey]; ok {
+			err = prevCIDR.UnmarshalJSON([]byte(prevCIDRString))
+			if err != nil {
+				log.Errorf("Couldn't parse previous %s from subnet file at %s: %s", CIDRKey, path, err)
+			}
+		}
+	}
+	return prevCIDR
+}
+
 
 func LookupExtIface(ifname string, ifregex string) (*backend.ExternalInterface, error) {
 	var iface *net.Interface
 	var ifaceAddr net.IP
 	var err error
 
+	// 如果指定了设备名称
 	if len(ifname) > 0 {
 		if ifaceAddr = net.ParseIP(ifname); ifaceAddr != nil {
 			log.Infof("Searching for interface using %s", ifaceAddr)
