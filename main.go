@@ -108,5 +108,7 @@ func usage() {
 }
 
 func main()  {
-	log.V(2).Info("starting")
+	log.V(1).Info("lever 1")
+	log.V(2).Info("lever 2")
+	log.V(3).Info("lever 3")
 }
