@@ -4,8 +4,15 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/nicktming/myflannel/backend"
+	"github.com/nicktming/myflannel/pkg/ip"
+	"github.com/nicktming/myflannel/version"
+	"github.com/coreos/pkg/flagutil"
+	"net"
 	"os"
 	log "github.com/golang/glog"
+	"regexp"
+	"strings"
 )
 
 type flagSlice []string
@@ -108,7 +115,194 @@ func usage() {
 }
 
 func main()  {
-	log.V(1).Info("lever 1")
-	log.V(2).Info("lever 2")
-	log.V(3).Info("lever 3")
+	if opts.version {
+		fmt.Fprintln(os.Stderr, version.Version)
+		os.Exit(0)
+	}
+
+	flagutil.SetFlagsFromEnv(flannelFlags, "FLANNELD")
+
+	// Validate flags
+	if opts.subnetLeaseRenewMargin >= 24*60 || opts.subnetLeaseRenewMargin <= 0 {
+		log.Error("Invalid subnet-lease-renew-margin option, out of acceptable range")
+		os.Exit(1)
+	}
+	// Work out which interface to use
+	var extIface *backend.ExternalInterface
+	var err error
+
+	// Check the default interface only if no interfaces are specified
+	if len(opts.iface) == 0 && len(opts.ifaceRegex) == 0 {
+		// 因为没有指定iface 所以直接从eth0里面找
+		extIface, err = LookupExtIface("", "")
+		if err != nil {
+			log.Error("Failed to find any valid interface to use: ", err)
+			os.Exit(1)
+		}
+	} else {
+		// 按指定iface找
+		// Check explicitly specified interfaces
+		for _, iface := range opts.iface {
+			extIface, err = LookupExtIface(iface, "")
+			if err != nil {
+				log.Infof("Could not find valid interface matching %s: %s", iface, err)
+			}
+
+			if extIface != nil {
+				break
+			}
+		}
+
+		// Check interfaces that match any specified regexes
+		if extIface == nil {
+			for _, ifaceRegex := range opts.ifaceRegex {
+				extIface, err = LookupExtIface("", ifaceRegex)
+				if err != nil {
+					log.Infof("Could not find valid interface matching %s: %s", ifaceRegex, err)
+				}
+
+				if extIface != nil {
+					break
+				}
+			}
+		}
+
+		if extIface == nil {
+			// Exit if any of the specified interfaces do not match
+			log.Error("Failed to find interface to use that matches the interfaces and/or regexes provided")
+			os.Exit(1)
+		}
+	}
+
+	//type Interface struct {
+	//	Index        int          // positive integer that starts at one, zero is never used
+	//	MTU          int          // maximum transmission unit
+	//	Name         string       // e.g., "en0", "lo0", "eth0.100"
+	//	HardwareAddr HardwareAddr // IEEE MAC-48, EUI-48 and EUI-64 form
+	//	Flags        Flags        // e.g., FlagUp, FlagLoopback, FlagMulticast
+	//}
+
+	//type ExternalInterface struct {
+	//	Iface     *net.Interface
+	//	IfaceAddr net.IP
+	//	ExtAddr   net.IP
+	//}
+
+	log.Infof("IfaceAddr:%v, ExtAddr:%v, Iface.Name:%s, Iface.Index:%d, Iface.MTU:%d", extIface.IfaceAddr, extIface.ExtAddr,
+		extIface.Iface.Name, extIface.Iface.Index, extIface.Iface.MTU)
+
 }
+
+func LookupExtIface(ifname string, ifregex string) (*backend.ExternalInterface, error) {
+	var iface *net.Interface
+	var ifaceAddr net.IP
+	var err error
+
+	if len(ifname) > 0 {
+		if ifaceAddr = net.ParseIP(ifname); ifaceAddr != nil {
+			log.Infof("Searching for interface using %s", ifaceAddr)
+			iface, err = ip.GetInterfaceByIP(ifaceAddr)
+			if err != nil {
+				return nil, fmt.Errorf("error looking up interface %s: %s", ifname, err)
+			}
+		} else {
+			iface, err = net.InterfaceByName(ifname)
+			if err != nil {
+				return nil, fmt.Errorf("error looking up interface %s: %s", ifname, err)
+			}
+		}
+	} else if len(ifregex) > 0 {
+		// Use the regex if specified and the iface option for matching a specific ip or name is not used
+		ifaces, err := net.Interfaces()
+		if err != nil {
+			return nil, fmt.Errorf("error listing all interfaces: %s", err)
+		}
+
+		// Check IP
+		for _, ifaceToMatch := range ifaces {
+			ifaceIP, err := ip.GetIfaceIP4Addr(&ifaceToMatch)
+			if err != nil {
+				// Skip if there is no IPv4 address
+				continue
+			}
+
+			matched, err := regexp.MatchString(ifregex, ifaceIP.String())
+			if err != nil {
+				return nil, fmt.Errorf("regex error matching pattern %s to %s", ifregex, ifaceIP.String())
+			}
+
+			if matched {
+				ifaceAddr = ifaceIP
+				iface = &ifaceToMatch
+				break
+			}
+		}
+
+		// Check Name
+		if iface == nil && ifaceAddr == nil {
+			for _, ifaceToMatch := range ifaces {
+				matched, err := regexp.MatchString(ifregex, ifaceToMatch.Name)
+				if err != nil {
+					return nil, fmt.Errorf("regex error matching pattern %s to %s", ifregex, ifaceToMatch.Name)
+				}
+
+				if matched {
+					iface = &ifaceToMatch
+					break
+				}
+			}
+		}
+
+		// Check that nothing was matched
+		if iface == nil {
+			var availableFaces []string
+			for _, f := range ifaces {
+				ip, _ := ip.GetIfaceIP4Addr(&f) // We can safely ignore errors. We just won't log any ip
+				availableFaces = append(availableFaces, fmt.Sprintf("%s:%s", f.Name, ip))
+			}
+
+			return nil, fmt.Errorf("Could not match pattern %s to any of the available network interfaces (%s)", ifregex, strings.Join(availableFaces, ", "))
+		}
+	} else {
+		log.Info("Determining IP address of default interface")
+		if iface, err = ip.GetDefaultGatewayIface(); err != nil {
+			return nil, fmt.Errorf("failed to get default interface: %s", err)
+		}
+	}
+
+	if ifaceAddr == nil {
+		ifaceAddr, err = ip.GetIfaceIP4Addr(iface)
+		if err != nil {
+			return nil, fmt.Errorf("failed to find IPv4 address for interface %s", iface.Name)
+		}
+	}
+
+	log.Infof("Using interface with name %s and address %s", iface.Name, ifaceAddr)
+
+	if iface.MTU == 0 {
+		return nil, fmt.Errorf("failed to determine MTU for %s interface", ifaceAddr)
+	}
+
+	var extAddr net.IP
+
+	log.Info("opts.publicIP:%s\n", opts.publicIP)
+	if len(opts.publicIP) > 0 {
+		extAddr = net.ParseIP(opts.publicIP)
+		if extAddr == nil {
+			return nil, fmt.Errorf("invalid public IP address: %s", opts.publicIP)
+		}
+		log.Infof("Using %s as external address", extAddr)
+	}
+
+	if extAddr == nil {
+		log.Infof("Defaulting external address to interface address (%s)", ifaceAddr)
+		extAddr = ifaceAddr
+	}
+
+	return &backend.ExternalInterface{
+		Iface:     iface,
+		IfaceAddr: ifaceAddr,
+		ExtAddr:   extAddr,
+	}, nil
+}
+
