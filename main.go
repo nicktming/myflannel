@@ -221,10 +221,10 @@ func newSubnetManager() (subnet.Manager, error) {
 	}
 
 
-	log.Info("======>subnetFile:%s\n", opts.subnetFile)
+	log.Infof("======>subnetFile:%s\n", opts.subnetFile)
 	// Attempt to renew the lease for the subnet specified in the subnetFile
 	prevSubnet := ReadCIDRFromSubnetFile(opts.subnetFile, "FLANNEL_SUBNET")
-	log.Info("======>subnetFile:%s\n", opts.subnetFile)
+	log.Infof("======>subnetFile:%s\n", opts.subnetFile)
 
 	return etcdv2.NewLocalManager(cfg, prevSubnet)
 }
