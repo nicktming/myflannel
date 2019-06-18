@@ -208,6 +208,8 @@ func main()  {
 	}
 	log.Infof("Created subnet manager: %s", sm.Name())
 
+
+	// 优雅退出
 	// Register for SIGINT and SIGTERM
 	log.Info("Installing signal handlers")
 	sigs := make(chan os.Signal, 1)
