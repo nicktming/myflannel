@@ -13,10 +13,16 @@ import (
 	"github.com/nicktming/myflannel/version"
 	"github.com/coreos/pkg/flagutil"
 	"net"
+	"net/http"
 	"os"
 	log "github.com/golang/glog"
+	"os/signal"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync"
+	"syscall"
+	"golang.org/x/net/context"
 )
 
 type flagSlice []string
@@ -202,14 +208,70 @@ func main()  {
 	}
 	log.Infof("Created subnet manager: %s", sm.Name())
 
+	// Register for SIGINT and SIGTERM
+	log.Info("Installing signal handlers")
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
+
+	// This is the main context that everything should run in.
+	// All spawned goroutines should exit when cancel is called on this context.
+	// Go routines spawned from main.go coordinate using a WaitGroup. This provides a mechanism to allow the shutdownHandler goroutine
+	// to block until all the goroutines return . If those goroutines spawn other goroutines then they are responsible for
+	// blocking and returning only when cancel() is called.
+	ctx, cancel := context.WithCancel(context.Background())
+	wg := sync.WaitGroup{}
+
+	wg.Add(1)
+	go func() {
+		shutdownHandler(ctx, sigs, cancel)
+		wg.Done()
+	}()
+
+	if opts.healthzPort > 0 {
+		// It's not super easy to shutdown the HTTP server so don't attempt to stop it cleanly
+		go mustRunHealthz()
+	}
+
+}
+
+func shutdownHandler(ctx context.Context, sigs chan os.Signal, cancel context.CancelFunc) {
+	// Wait for the context do be Done or for the signal to come in to shutdown.
+	select {
+	case <-ctx.Done():
+		log.Info("Stopping shutdownHandler...")
+	// 当有signal触发的时候 会进入到此处
+	case <-sigs:
+		// Call cancel on the context to close everything down.
+		cancel()
+		log.Info("shutdownHandler sent cancel signal...")
+	}
+
+	// Unregister to get default OS nuke behaviour in case we don't exit cleanly
+	signal.Stop(sigs)
+}
+
+func mustRunHealthz() {
+	address := net.JoinHostPort(opts.healthzIP, strconv.Itoa(opts.healthzPort))
+	log.Infof("Start healthz server on %s", address)
+
+	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("flanneld is running"))
+	})
+
+	if err := http.ListenAndServe(address, nil); err != nil {
+		log.Errorf("Start healthz server error. %v", err)
+		panic(err)
+	}
 }
 
 
 func newSubnetManager() (subnet.Manager, error) {
+	// 如果有kubesubnetMgr
 	if opts.kubeSubnetMgr {
 		return kube.NewSubnetManager(opts.kubeApiUrl, opts.kubeConfigFile, opts.kubeAnnotationPrefix, opts.netConfPath)
 	}
-
+	// 使用etcd管理子网
 	cfg := &etcdv2.EtcdConfig{
 		Endpoints: strings.Split(opts.etcdEndpoints, ","),
 		Keyfile:   opts.etcdKeyfile,
@@ -224,11 +286,12 @@ func newSubnetManager() (subnet.Manager, error) {
 	log.Infof("======>subnetFile:%s\n", opts.subnetFile)
 	// Attempt to renew the lease for the subnet specified in the subnetFile
 	prevSubnet := ReadCIDRFromSubnetFile(opts.subnetFile, "FLANNEL_SUBNET")
-	log.Infof("======>subnetFile:%s\n", opts.subnetFile)
+	log.Infof("======>prevSubnet:%s\n", prevSubnet)
 
 	return etcdv2.NewLocalManager(cfg, prevSubnet)
 }
 
+// 从/run/flannel/subnet.env中读子网
 func ReadCIDRFromSubnetFile(path string, CIDRKey string) ip.IP4Net {
 	var prevCIDR ip.IP4Net
 	if _, err := os.Stat(path); !os.IsNotExist(err) {

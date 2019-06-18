@@ -70,6 +70,7 @@ func (c watchCursor) String() string {
 }
 
 func NewLocalManager(config *EtcdConfig, prevSubnet ip.IP4Net) (Manager, error) {
+	// 根据etcd配置生成etcd 客户端
 	r, err := newEtcdSubnetRegistry(config, nil)
 	if err != nil {
 		return nil, err
