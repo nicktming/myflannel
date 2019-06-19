@@ -268,6 +268,16 @@ func main()  {
 	log.Infof("======>be:%v\n", be)
 
 
+	bn, err := be.RegisterNetwork(ctx, wg, config)
+	if err != nil {
+		log.Errorf("Error registering network: %s", err)
+		cancel()
+		wg.Wait()
+		os.Exit(1)
+	}
+	log.Infof("======>expiration:%v\n", bn.Lease().Expiration)
+
+
 	log.Info("Waiting for all goroutines to exit")
 	// Block waiting for all the goroutines to finish.
 	wg.Wait()
