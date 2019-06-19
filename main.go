@@ -23,6 +23,7 @@ import (
 	"sync"
 	"syscall"
 	"golang.org/x/net/context"
+	"time"
 )
 
 type flagSlice []string
@@ -234,12 +235,53 @@ func main()  {
 		go mustRunHealthz()
 	}
 
+
+	// Fetch the network config (i.e. what backend to use etc..).
+	config, err := getConfig(ctx, sm)
+	if err == errCanceled {
+		wg.Wait()
+		os.Exit(0)
+	}
+
+	// Create a backend manager then use it to create the backend and register the network with it.
+	bm := backend.NewManager(ctx, sm, extIface)
+	be, err := bm.GetBackend(config.BackendType)
+	if err != nil {
+		log.Errorf("Error fetching backend: %s", err)
+		cancel()
+		wg.Wait()
+		os.Exit(1)
+	}
+	log.Infof("======>be:%v\n", be)
+
+
 	log.Info("Waiting for all goroutines to exit")
 	// Block waiting for all the goroutines to finish.
 	wg.Wait()
 	log.Info("Exiting cleanly...")
 	os.Exit(0)
 
+}
+
+func getConfig(ctx context.Context, sm subnet.Manager) (*subnet.Config, error) {
+	// Retry every second until it succeeds
+	for {
+		config, err := sm.GetNetworkConfig(ctx)
+		if err != nil {
+			log.Errorf("Couldn't fetch network config: %s", err)
+		} else if config == nil {
+			log.Warningf("Couldn't find network config: %s", err)
+		} else {
+			log.Infof("Found network config - Backend type: %s", config.BackendType)
+			return config, nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil, errCanceled
+		case <-time.After(1 * time.Second):
+			fmt.Println("timed out")
+		}
+	}
 }
 
 func shutdownHandler(ctx context.Context, sigs chan os.Signal, cancel context.CancelFunc) {
