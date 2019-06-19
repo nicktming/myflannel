@@ -4,6 +4,8 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/coreos/pkg/flagutil"
+	log "github.com/golang/glog"
 	"github.com/joho/godotenv"
 	"github.com/nicktming/myflannel/backend"
 	"github.com/nicktming/myflannel/pkg/ip"
@@ -11,18 +13,16 @@ import (
 	"github.com/nicktming/myflannel/subnet/etcdv2"
 	"github.com/nicktming/myflannel/subnet/kube"
 	"github.com/nicktming/myflannel/version"
-	"github.com/coreos/pkg/flagutil"
+	"golang.org/x/net/context"
 	"net"
 	"net/http"
 	"os"
-	log "github.com/golang/glog"
 	"os/signal"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
-	"golang.org/x/net/context"
 	"time"
 )
 
@@ -242,7 +242,17 @@ func main()  {
 		wg.Wait()
 		os.Exit(0)
 	}
-	log.Infof("======>config:%v\n", config)
+
+	//type Config struct {
+	//	Network     ip.IP4Net
+	//	SubnetMin   ip.IP4
+	//	SubnetMax   ip.IP4
+	//	SubnetLen   uint
+	//	BackendType string          `json:"-"`
+	//	Backend     json.RawMessage `json:",omitempty"`
+	//}
+	log.Infof("======>config: network:%v, subnetMin:%v, subnetMax:%v, subnetLen:%v, backendType:%v, backend:%v\n",
+		config.Network, config.SubnetMin, config.SubnetMax, config.SubnetLen, config.BackendType, config.Backend)
 
 	// Create a backend manager then use it to create the backend and register the network with it.
 	bm := backend.NewManager(ctx, sm, extIface)
