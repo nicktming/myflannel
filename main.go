@@ -24,6 +24,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	_ "github.com/nicktming/myflannel/backend/vxlan"
 )
 
 type flagSlice []string
