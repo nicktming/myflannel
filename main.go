@@ -4,6 +4,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/coreos/go-systemd/daemon"
 	"github.com/nicktming/myflannel/network"
 	"github.com/coreos/pkg/flagutil"
 	log "github.com/golang/glog"
@@ -315,12 +316,68 @@ func main()  {
 		wg.Done()
 	}()
 
+	daemon.SdNotify(false, "READY=1")
+
+	// Kube subnet mgr doesn't lease the subnet for this node - it just uses the podCidr that's already assigned.
+	if !opts.kubeSubnetMgr {
+		err = MonitorLease(ctx, sm, bn, &wg)
+		if err == errInterrupted {
+			// The lease was "revoked" - shut everything down
+			cancel()
+		}
+	}
+
 	log.Info("Waiting for all goroutines to exit")
 	// Block waiting for all the goroutines to finish.
 	wg.Wait()
 	log.Info("Exiting cleanly...")
 	os.Exit(0)
 
+}
+
+func MonitorLease(ctx context.Context, sm subnet.Manager, bn backend.Network, wg *sync.WaitGroup) error {
+	// Use the subnet manager to start watching leases.
+	evts := make(chan subnet.Event)
+
+	wg.Add(1)
+	go func() {
+		subnet.WatchLease(ctx, sm, bn.Lease().Subnet, evts)
+		wg.Done()
+	}()
+
+	renewMargin := time.Duration(opts.subnetLeaseRenewMargin) * time.Minute
+	dur := bn.Lease().Expiration.Sub(time.Now()) - renewMargin
+
+	for {
+		select {
+		case <-time.After(dur):
+			err := sm.RenewLease(ctx, bn.Lease())
+			if err != nil {
+				log.Error("Error renewing lease (trying again in 1 min): ", err)
+				dur = time.Minute
+				continue
+			}
+
+			log.Info("Lease renewed, new expiration: ", bn.Lease().Expiration)
+			dur = bn.Lease().Expiration.Sub(time.Now()) - renewMargin
+
+		case e := <-evts:
+			switch e.Type {
+			case subnet.EventAdded:
+				bn.Lease().Expiration = e.Lease.Expiration
+				dur = bn.Lease().Expiration.Sub(time.Now()) - renewMargin
+				log.Infof("Waiting for %s to renew lease", dur)
+
+			case subnet.EventRemoved:
+				log.Error("Lease has been revoked. Shutting down daemon.")
+				return errInterrupted
+			}
+
+		case <-ctx.Done():
+			log.Infof("Stopped monitoring lease")
+			return errCanceled
+		}
+	}
 }
 
 func WriteSubnetFile(path string, nw ip.IP4Net, ipMasq bool, bn backend.Network) error {
