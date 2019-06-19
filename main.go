@@ -307,6 +307,14 @@ func main()  {
 		log.Infof("Wrote subnet file to %s", opts.subnetFile)
 	}
 
+	// Start "Running" the backend network. This will block until the context is done so run in another goroutine.
+	log.Info("Running backend.")
+	wg.Add(1)
+	go func() {
+		bn.Run(ctx)
+		wg.Done()
+	}()
+
 	log.Info("Waiting for all goroutines to exit")
 	// Block waiting for all the goroutines to finish.
 	wg.Wait()
