@@ -242,6 +242,7 @@ func main()  {
 		wg.Wait()
 		os.Exit(0)
 	}
+	log.Infof("======>config:%v\n", config)
 
 	// Create a backend manager then use it to create the backend and register the network with it.
 	bm := backend.NewManager(ctx, sm, extIface)
