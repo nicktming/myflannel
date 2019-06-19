@@ -234,6 +234,12 @@ func main()  {
 		go mustRunHealthz()
 	}
 
+	log.Info("Waiting for all goroutines to exit")
+	// Block waiting for all the goroutines to finish.
+	wg.Wait()
+	log.Info("Exiting cleanly...")
+	os.Exit(0)
+
 }
 
 func shutdownHandler(ctx context.Context, sigs chan os.Signal, cancel context.CancelFunc) {
