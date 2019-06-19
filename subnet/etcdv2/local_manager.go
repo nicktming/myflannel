@@ -141,6 +141,7 @@ func (m *LocalManager) tryAcquireLease(ctx context.Context, config *Config, extI
 		return nil, err
 	}
 
+	// 如果subnets已经分配有的话 直接获得
 	// Try to reuse a subnet if there's one that matches our IP
 	if l := findLeaseByIP(leases, extIaddr); l != nil {
 		// Make sure the existing subnet is still within the configured network
@@ -168,6 +169,8 @@ func (m *LocalManager) tryAcquireLease(ctx context.Context, config *Config, extI
 		}
 	}
 
+
+	// 从/run/flannel/subnet.env 本地是否有以前获得过的子网网段
 	// no existing match, check if there was a previous subnet to use
 	var sn ip.IP4Net
 	if !m.previousSubnet.Empty() {
@@ -207,6 +210,7 @@ func (m *LocalManager) tryAcquireLease(ctx context.Context, config *Config, extI
 		}
 	}
 
+	// 分配一个新的
 	if sn.Empty() {
 		// no existing match, grab a new one
 		sn, err = m.allocateSubnet(config, leases)
@@ -215,6 +219,7 @@ func (m *LocalManager) tryAcquireLease(ctx context.Context, config *Config, extI
 		}
 	}
 
+	// 创建一个 其实就是把信息写到etcd中
 	exp, err := m.registry.createSubnet(ctx, sn, attrs, subnetTTL)
 	switch {
 	case err == nil:

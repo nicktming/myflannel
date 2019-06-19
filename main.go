@@ -4,6 +4,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/nicktming/myflannel/network"
 	"github.com/coreos/pkg/flagutil"
 	log "github.com/golang/glog"
 	"github.com/joho/godotenv"
@@ -18,6 +19,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -278,6 +280,33 @@ func main()  {
 	log.Infof("======>expiration:%v\n", bn.Lease().Expiration)
 
 
+	// Set up ipMasq if needed
+	if opts.ipMasq {
+		if err = recycleIPTables(config.Network, bn.Lease()); err != nil {
+			log.Errorf("Failed to recycle IPTables rules, %v", err)
+			cancel()
+			wg.Wait()
+			os.Exit(1)
+		}
+		log.Infof("Setting up masking rules")
+		go network.SetupAndEnsureIPTables(network.MasqRules(config.Network, bn.Lease()), opts.iptablesResyncSeconds)
+	}
+
+	// Always enables forwarding rules. This is needed for Docker versions >1.13 (https://docs.docker.com/engine/userguide/networking/default_network/container-communication/#container-communication-between-hosts)
+	// In Docker 1.12 and earlier, the default FORWARD chain policy was ACCEPT.
+	// In Docker 1.13 and later, Docker sets the default policy of the FORWARD chain to DROP.
+	if opts.iptablesForwardRules {
+		log.Infof("Changing default FORWARD chain policy to ACCEPT")
+		go network.SetupAndEnsureIPTables(network.ForwardRules(config.Network.String()), opts.iptablesResyncSeconds)
+	}
+
+	if err := WriteSubnetFile(opts.subnetFile, config.Network, opts.ipMasq, bn); err != nil {
+		// Continue, even though it failed.
+		log.Warningf("Failed to write subnet file: %s", err)
+	} else {
+		log.Infof("Wrote subnet file to %s", opts.subnetFile)
+	}
+
 	log.Info("Waiting for all goroutines to exit")
 	// Block waiting for all the goroutines to finish.
 	wg.Wait()
@@ -285,6 +314,53 @@ func main()  {
 	os.Exit(0)
 
 }
+
+func WriteSubnetFile(path string, nw ip.IP4Net, ipMasq bool, bn backend.Network) error {
+	dir, name := filepath.Split(path)
+	os.MkdirAll(dir, 0755)
+
+	tempFile := filepath.Join(dir, "."+name)
+	f, err := os.Create(tempFile)
+	if err != nil {
+		return err
+	}
+
+	// Write out the first usable IP by incrementing
+	// sn.IP by one
+	sn := bn.Lease().Subnet
+	sn.IP += 1
+
+	fmt.Fprintf(f, "FLANNEL_NETWORK=%s\n", nw)
+	fmt.Fprintf(f, "FLANNEL_SUBNET=%s\n", sn)
+	fmt.Fprintf(f, "FLANNEL_MTU=%d\n", bn.MTU())
+	_, err = fmt.Fprintf(f, "FLANNEL_IPMASQ=%v\n", ipMasq)
+	f.Close()
+	if err != nil {
+		return err
+	}
+
+	// rename(2) the temporary file to the desired location so that it becomes
+	// atomically visible with the contents
+	return os.Rename(tempFile, path)
+	//TODO - is this safe? What if it's not on the same FS?
+}
+
+func recycleIPTables(nw ip.IP4Net, lease *subnet.Lease) error {
+	prevNetwork := ReadCIDRFromSubnetFile(opts.subnetFile, "FLANNEL_NETWORK")
+	prevSubnet := ReadCIDRFromSubnetFile(opts.subnetFile, "FLANNEL_SUBNET")
+	// recycle iptables rules only when network configured or subnet leased is not equal to current one.
+	if prevNetwork != nw && prevSubnet != lease.Subnet {
+		log.Infof("Current network or subnet (%v, %v) is not equal to previous one (%v, %v), trying to recycle old iptables rules", nw, lease.Subnet, prevNetwork, prevSubnet)
+		lease := &subnet.Lease{
+			Subnet: prevSubnet,
+		}
+		if err := network.DeleteIPTables(network.MasqRules(prevNetwork, lease)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 
 func getConfig(ctx context.Context, sm subnet.Manager) (*subnet.Config, error) {
 	// Retry every second until it succeeds
