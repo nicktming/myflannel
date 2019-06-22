@@ -1,1 +1,2 @@
 # myflannel
+> go build .
